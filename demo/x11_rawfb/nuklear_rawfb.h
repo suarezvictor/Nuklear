@@ -59,12 +59,17 @@ NK_API void                  nk_rawfb_resize_fb(struct rawfb_context *rawfb, voi
 /*
 //RAW API
 nk_internal_clear(rawfb, col)
-nk_internal_fill_rect(rawfb, x0, y0, x1, y1, col); //coords already clipped
-nk_internal_line_horizontal(rawfb, x0, y, x1, col); //coords already clipped
-nk_internal_line_vertical(rawfb, x, y0, y1, col); //coords already clipped
+
+//expects coords already clipped
+nk_internal_fill_rect(rawfb, x0, y0, x1, y1, col); 
+nk_internal_line_horizontal(rawfb, x0, y, x1, col);
+nk_internal_line_vertical(rawfb, x, y0, y1, col); 
+nk_internal_img_setpixel()
+nk_internal_blit_alpha_mask(ptr, pitch, src_alpha, x0, y0, x1, y1, src_pitch, col)
+
+//clips internally
 nk_internal_line(rawfb, x0, y0, x1, y1, col);
 nk_internal_setpixel(ptr, pitch, x, y, col);
-nk_internal_blit_alpha_mask(ptr, pitch, src_alpha, x0, y0, x1, y1, src_pitch, col) //expects clipped
 */
 
 
@@ -95,10 +100,10 @@ struct rawfb_context {
 #define DISABLE_RECT_MULTICOLOR //not tested
 #define DISABLE_LINE_HORIZONTAL //not based on setpixel
 #define DISABLE_LINE_VERTICAL //not based on setpixel
-#define DISABLE_LINE //calls setpixel
-#define DISABLE_ARC //calls setpixel
 #define DISABLE_BLIT_ALPHA
 #endif
+#define DISABLE_LINE //calls setpixel
+#define DISABLE_ARC //calls setpixel
 
 
 static void
@@ -711,13 +716,27 @@ nk_rawfb_fill_rect(const struct rawfb_context *rawfb,
         int y0 = MAX(rawfb->scissors.y, MIN(rawfb->scissors.h, y));
         int x1 = MAX(rawfb->scissors.x, MIN(rawfb->scissors.w, x+w));
         int y1 = MAX(rawfb->scissors.y, MIN(rawfb->scissors.h, y+h));
-        nk_internal_fill_rect(rawfb, x0, y0, x1, y1, nk_rawfb_color2int(col, rawfb->fb.pl));
+        unsigned int c = nk_rawfb_color2int(col, rawfb->fb.pl);
+        nk_internal_fill_rect(rawfb, x0, y0, x1, y1, c);
     } else {
         const short xc = x + r;
         const short yc = y + r;
         const short wc = (short)(w - 2 * r);
         const short hc = (short)(h - 2 * r);
-
+#if 1
+        //recursive calls but with radius 0
+        nk_rawfb_fill_arc(rawfb, xc + wc - r, y,
+                (unsigned)r*2, (unsigned)r*2, 0 , col);
+        nk_rawfb_fill_rect(rawfb, xc, y, wc, r, 0, col);
+        nk_rawfb_fill_arc(rawfb, x, y,
+                (unsigned)r*2, (unsigned)r*2, 90 , col);
+        nk_rawfb_fill_rect(rawfb, x, yc, w, hc, 0, col);
+        nk_rawfb_fill_arc(rawfb, x, yc + hc - r,
+                (unsigned)r*2, (unsigned)r*2, 270 , col);
+        nk_rawfb_fill_rect(rawfb, xc, y+h-r, wc, r, 0, col);
+        nk_rawfb_fill_arc(rawfb, xc + wc - r, yc + hc - r,
+                (unsigned)r*2, (unsigned)r*2, 180 , col);
+#else
         struct nk_vec2i pnts[12];
         pnts[0].x = x;
         pnts[0].y = yc;
@@ -747,8 +766,7 @@ nk_rawfb_fill_rect(const struct rawfb_context *rawfb,
         pnts[11].x = x;
         pnts[11].y = yc + hc;
 
-        nk_rawfb_fill_polygon(rawfb, pnts, 12, col); //TODO: use just rects
-
+        nk_rawfb_fill_polygon(rawfb, pnts, 12, col);
         nk_rawfb_fill_arc(rawfb, xc + wc - r, y,
                 (unsigned)r*2, (unsigned)r*2, 0 , col);
         nk_rawfb_fill_arc(rawfb, x, y,
@@ -757,6 +775,7 @@ nk_rawfb_fill_rect(const struct rawfb_context *rawfb,
                 (unsigned)r*2, (unsigned)r*2, 270 , col);
         nk_rawfb_fill_arc(rawfb, xc + wc - r, yc + hc - r,
                 (unsigned)r*2, (unsigned)r*2, 180 , col);
+#endif
     }
 }
 
