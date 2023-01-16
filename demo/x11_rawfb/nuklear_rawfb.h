@@ -55,6 +55,18 @@ NK_API void                  nk_rawfb_resize_fb(struct rawfb_context *rawfb, voi
  * ===============================================================
  */
 #ifdef NK_RAWFB_IMPLEMENTATION
+
+/*
+//RAW API
+nk_rawfb_internal_fill_rect(rawfb, x0, y0, x1, y1, col); //coords already clipped
+nk_internal_line_horizontal(rawfb, x0, y, x1, col); //coords already clipped
+nk_internal_line_vertical(rawfb, x, y0, y1, col); //coords already clipped
+nk_internal_line_slopelow(rawfb, x0, y0, x1, y1, dx, dy, sx, sy, col);
+nk_internal_line_slopehigh(rawfb, x0, y0, x1, y1, dx, dy, sx, sy col);
+nk_internal_setpixel(rawfb, x, y, col);
+*/
+
+
 struct rawfb_image {
     void *pixels;
     int w, h, pitch;
@@ -79,12 +91,12 @@ struct rawfb_context {
 #if 0
 #define DISABLE_RECT
 #define DISABLE_RECT_MULTICOLOR //not tested
-#define DISABLE_LINE_HORIZONTAL //not based on setpixel (most called function)
-#define DISABLE_LINE_VERTICAL //not based on setpixel (most called function)
+#define DISABLE_LINE_HORIZONTAL //not based on setpixel
+#define DISABLE_LINE_VERTICAL //not based on setpixel
 #define DISABLE_LINE_SLOPE //calls setpixel
-#define DISABLE_STRETCH_IMAGE //not tested
+#define DISABLE_STRETCH_IMAGE //used for text
 #define DISABLE_ARC
-#define DISABLE_IMG_SETPIXEL //not tested
+#define DISABLE_IMG_SETPIXEL //used for text
 #endif
 
 static void
@@ -106,26 +118,14 @@ nk_internal_setpixel(const struct rawfb_context *rawfb,
 static void
 nk_internal_line_slopelow(const struct rawfb_context *rawfb,
     short x0, short y0, short x1, short y1,
-    short dx, short dy, const unsigned int col)
+    short dx, short dy, int stepx, int stepy,
+    const unsigned int col)
 {
-    NK_UNUSED(y1);
-
-    int stepx, stepy;
-    if (dx < 0) {
-        dx = -dx;
-        stepx = -1;
-    } else stepx = 1;
-    dx <<= 1;
-
-    if (dy < 0) {
-        dy = -dy;
-        stepy = -1;
-    } else stepy = 1;
-    dy <<= 1;
+    NK_UNUSED(x1);
 
     int fraction = dy - (dx >> 1);
-    nk_internal_setpixel(rawfb, x0, y0, col);
 #ifndef DISABLE_LINE_SLOPE
+    nk_internal_setpixel(rawfb, x0, y0, col);
     while (x0 != x1) {
         if (fraction >= 0) {
             y0 += stepy;
@@ -141,25 +141,14 @@ nk_internal_line_slopelow(const struct rawfb_context *rawfb,
 static void
 nk_internal_line_slopehigh(const struct rawfb_context *rawfb,
     short x0, short y0, short x1, short y1,
-    short dx, short dy, const unsigned int col)
+    short dx, short dy, int stepx, int stepy,
+    const unsigned int col)
 {
     NK_UNUSED(y1);
-    int stepx, stepy;
-    if (dx < 0) {
-        dx = -dx;
-        stepx = -1;
-    } else stepx = 1;
-    dx <<= 1;
-
-    if (dy < 0) {
-        dy = -dy;
-        stepy = -1;
-    } else stepy = 1;
-    dy <<= 1;
 
     int fraction = dx - (dy >> 1);
-    nk_internal_setpixel(rawfb, x0, y0, col);
 #ifndef DISABLE_LINE_SLOPE
+    nk_internal_setpixel(rawfb, x0, y0, col);
     while (y0 != y1) {
         if (fraction >= 0) {
             x0 += stepx;
@@ -194,56 +183,48 @@ nk_internal_line_vertical(const struct rawfb_context *rawfb,
 }
 
 static void
-nk_internal_line_horizontal(const struct rawfb_context *rawfb,
-    const short x0, const short y, const short x1, unsigned int col)
-{
-    /* This function is called the most. Try to optimize it a bit...
-     * It does not check for scissors or image borders.
-     * The caller has to make sure it does no exceed bounds. */
-
-#if 0
-    for(int x = x0; x < x1; ++x)
-    {
-      nk_internal_setpixel(rawfb, x, y, col);
-    }
-#else
-    /* This function is called the most. Try to optimize it a bit...
-     * It does not check for scissors or image borders.
-     * The caller has to make sure it does no exceed bounds. */
-    unsigned int i, n;
-    unsigned int c[16];
-    unsigned char *pixels = rawfb->fb.pixels;
-    unsigned int *ptr;
-
-    pixels += y * rawfb->fb.pitch;
-    ptr = (unsigned int *)pixels + x0;
-
-    n = x1 - x0;
-    for (i = 0; i < sizeof(c) / sizeof(c[0]); i++)
-        c[i] = col;
-#ifndef DISABLE_LINE_HORIZONTAL
-    while (n > 16) { //TODO: alignment
-        memcpy((void *)ptr, c, sizeof(c));
-        n -= 16; ptr += 16;
-    } for (i = 0; i < n; i++)
-        ptr[i] = c[i];
-#endif
-#endif
-}
-
-static void
 nk_rawfb_internal_fill_rect(const struct rawfb_context *rawfb,
     const short x0, const short y0, const short x1, const short y1,
     const unsigned int col)
 {
+    /* This function does not check for scissors or image borders.
+     * The caller has to make sure it does no exceed bounds. */
+
+    unsigned int i, n;
+    unsigned int c[16];
+    unsigned char *pixels = rawfb->fb.pixels;
+    unsigned int *ptr;
+    for (i = 0; i < sizeof(c) / sizeof(c[0]); i++)
+        c[i] = col;
+
+    pixels += y0 * rawfb->fb.pitch;
     for (int y = y0; y < y1; y++)
     {
+        ptr = (unsigned int *)pixels + x0;
+
+        n = x1 - x0;
 #ifndef DISABLE_RECT
-        nk_internal_line_horizontal(rawfb, x0, y, x1, col);
+        while (n > 16) { //TODO: alignment
+            memcpy((void *)ptr, c, sizeof(c));
+            n -= 16; ptr += 16;
+        }
+        for (i = 0; i < n; i++)
+            ptr[i] = c[i];
 #endif
+        pixels += rawfb->fb.pitch;
     }
 }
 
+static void
+nk_internal_line_horizontal(const struct rawfb_context *rawfb,
+    const short x0, const short y, const short x1, unsigned int col)
+{
+    /* This function does not check for scissors or image borders.
+     * The caller has to make sure it does no exceed bounds. */
+#ifdef DISABLE_LINE_HORIZONTAL
+  nk_rawfb_internal_fill_rect(rawfb, x0, y, x1, y+1, col);
+#endif
+}
 
 /*
  * ==============================================================
@@ -442,13 +423,26 @@ nk_rawfb_stroke_line(const struct rawfb_context *rawfb,
         nk_rawfb_line_vertical(rawfb, x0, y0, y1, col);
         return;
     }
-#define iabs(x) ((x<0)?-(x):(x))    
-    if (iabs(dx) > iabs(dy)) {
-#undef iabs
-        nk_internal_line_slopelow(rawfb, x0, y0, x1, y1, dx, dy, c); //TODO: do clipping
-    } else {
-        nk_internal_line_slopehigh(rawfb, x0, y0, x1, y1, dx, dy, c); //TODO: do clipping
-    }
+
+    int stepx, stepy;
+    if (dx < 0) {
+        dx = -dx;
+        stepx = -1;
+    } else stepx = 1;
+    dx <<= 1;
+
+    if (dy < 0) {
+        dy = -dy;
+        stepy = -1;
+    } else stepy = 1;
+    dy <<= 1;
+
+    
+    //TODO: do clipping
+    if (dx > dy)
+        nk_internal_line_slopelow(rawfb, x0, y0, x1, y1, dx, dy, stepx, stepy, c);
+    else
+        nk_internal_line_slopehigh(rawfb, x0, y0, x1, y1, dx, dy, stepx, stepy, c);
 }
 
 static void
