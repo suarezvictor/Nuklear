@@ -76,6 +76,183 @@ struct rawfb_context {
 #define MAX(a,b) ((a) < (b) ? (b) : (a))
 #endif
 
+#if 0
+#define DISABLE_RECT
+#define DISABLE_RECT_MULTICOLOR //not tested
+#define DISABLE_LINE_HORIZONTAL //not based on setpixel (most called function)
+#define DISABLE_LINE_VERTICAL //not based on setpixel (most called function)
+#define DISABLE_LINE_SLOPE //calls setpixel
+#define DISABLE_STRETCH_IMAGE //not tested
+#define DISABLE_ARC
+#define DISABLE_IMG_SETPIXEL //not tested
+#endif
+
+static void
+nk_internal_setpixel(const struct rawfb_context *rawfb,
+    const short x, const short y, unsigned int c)
+{
+    if(x < rawfb->scissors.x || x >= rawfb->scissors.w)
+        return;
+    if(y < rawfb->scissors.y || y >= rawfb->scissors.h)
+        return;
+
+    unsigned char *pixels = rawfb->fb.pixels;
+    pixels += y * rawfb->fb.pitch;
+#ifndef DISABLE_SETPIXEL
+    ((unsigned int *)pixels)[x] = c;
+#endif
+}
+
+static void
+nk_internal_line_slopelow(const struct rawfb_context *rawfb,
+    short x0, short y0, short x1, short y1,
+    short dx, short dy, const unsigned int col)
+{
+    NK_UNUSED(y1);
+
+    int stepx, stepy;
+    if (dx < 0) {
+        dx = -dx;
+        stepx = -1;
+    } else stepx = 1;
+    dx <<= 1;
+
+    if (dy < 0) {
+        dy = -dy;
+        stepy = -1;
+    } else stepy = 1;
+    dy <<= 1;
+
+    int fraction = dy - (dx >> 1);
+    nk_internal_setpixel(rawfb, x0, y0, col);
+#ifndef DISABLE_LINE_SLOPE
+    while (x0 != x1) {
+        if (fraction >= 0) {
+            y0 += stepy;
+            fraction -= dx;
+        }
+        x0 += stepx;
+        fraction += dy;
+        nk_internal_setpixel(rawfb, x0, y0, col);
+    }
+#endif
+}
+
+static void
+nk_internal_line_slopehigh(const struct rawfb_context *rawfb,
+    short x0, short y0, short x1, short y1,
+    short dx, short dy, const unsigned int col)
+{
+    NK_UNUSED(y1);
+    int stepx, stepy;
+    if (dx < 0) {
+        dx = -dx;
+        stepx = -1;
+    } else stepx = 1;
+    dx <<= 1;
+
+    if (dy < 0) {
+        dy = -dy;
+        stepy = -1;
+    } else stepy = 1;
+    dy <<= 1;
+
+    int fraction = dx - (dy >> 1);
+    nk_internal_setpixel(rawfb, x0, y0, col);
+#ifndef DISABLE_LINE_SLOPE
+    while (y0 != y1) {
+        if (fraction >= 0) {
+            x0 += stepx;
+            fraction -= dy;
+        }
+        y0 += stepy;
+        fraction += dx;
+        nk_internal_setpixel(rawfb, x0, y0, col);
+    }
+#endif
+}
+
+static void
+nk_internal_line_vertical(const struct rawfb_context *rawfb,
+    short x, short y0, short y1, unsigned col)
+{
+    /* This function does not check for scissors or image borders.
+     * The caller has to make sure it does no exceed bounds. */
+
+#ifndef DISABLE_LINE_VERTICAL
+    unsigned int i, n;
+    unsigned char *pixels = rawfb->fb.pixels;
+
+    pixels += y0 * rawfb->fb.pitch + x*sizeof(col);
+    n = y1 - y0;
+    for (i = 0; i < n; i++)
+    {
+        *(unsigned *)pixels = col;
+        pixels += rawfb->fb.pitch;
+    }
+#endif
+}
+
+static void
+nk_internal_line_horizontal(const struct rawfb_context *rawfb,
+    const short x0, const short y, const short x1, unsigned int col)
+{
+    /* This function is called the most. Try to optimize it a bit...
+     * It does not check for scissors or image borders.
+     * The caller has to make sure it does no exceed bounds. */
+
+#if 0
+    for(int x = x0; x < x1; ++x)
+    {
+      nk_internal_setpixel(rawfb, x, y, col);
+    }
+#else
+    /* This function is called the most. Try to optimize it a bit...
+     * It does not check for scissors or image borders.
+     * The caller has to make sure it does no exceed bounds. */
+    unsigned int i, n;
+    unsigned int c[16];
+    unsigned char *pixels = rawfb->fb.pixels;
+    unsigned int *ptr;
+
+    pixels += y * rawfb->fb.pitch;
+    ptr = (unsigned int *)pixels + x0;
+
+    n = x1 - x0;
+    for (i = 0; i < sizeof(c) / sizeof(c[0]); i++)
+        c[i] = col;
+#ifndef DISABLE_LINE_HORIZONTAL
+    while (n > 16) { //TODO: alignment
+        memcpy((void *)ptr, c, sizeof(c));
+        n -= 16; ptr += 16;
+    } for (i = 0; i < n; i++)
+        ptr[i] = c[i];
+#endif
+#endif
+}
+
+static void
+nk_rawfb_internal_fill_rect(const struct rawfb_context *rawfb,
+    const short x0, const short y0, const short x1, const short y1,
+    const unsigned int col)
+{
+    for (int y = y0; y < y1; y++)
+    {
+#ifndef DISABLE_RECT
+        nk_internal_line_horizontal(rawfb, x0, y, x1, col);
+#endif
+    }
+}
+
+
+/*
+ * ==============================================================
+ *
+ *                          GENERIC IMPLEMENTATION
+ *
+ * ===============================================================
+ */
+
 static unsigned int
 nk_rawfb_color2int(const struct nk_color c, rawfb_pl pl)
 {
@@ -129,45 +306,31 @@ nk_rawfb_int2color(const unsigned int i, rawfb_pl pl)
 }
 
 static void
-nk_rawfb_ctx_setpixel(const struct rawfb_context *rawfb,
-    const short x0, const short y0, const struct nk_color col)
+nk_rawfb_line_vertical(const struct rawfb_context *rawfb,
+    short x, short y0, short y1, const struct nk_color col)
 {
+    if(x < rawfb->scissors.x || x >= rawfb->scissors.w)
+        return;
+     
+    y0 = MAX(rawfb->scissors.y, MIN(rawfb->scissors.h, y0));
+    y1 = MAX(rawfb->scissors.y, MIN(rawfb->scissors.h, y1));
+     
     unsigned int c = nk_rawfb_color2int(col, rawfb->fb.pl);
-    unsigned char *pixels = rawfb->fb.pixels;
-    unsigned int *ptr;
-
-    pixels += y0 * rawfb->fb.pitch;
-    ptr = (unsigned int *)pixels + x0;
-
-    if (y0 < rawfb->scissors.h && y0 >= rawfb->scissors.y &&
-        x0 >= rawfb->scissors.x && x0 < rawfb->scissors.w)
-        *ptr = c;
+    nk_internal_line_vertical(rawfb, x, y0, y1, c);
 }
 
-static void
+static void	
 nk_rawfb_line_horizontal(const struct rawfb_context *rawfb,
-    const short x0, const short y, const short x1, const struct nk_color col)
+    short x0, short y, short x1, const struct nk_color col)
 {
-    /* This function is called the most. Try to optimize it a bit...
-     * It does not check for scissors or image borders.
-     * The caller has to make sure it does no exceed bounds. */
-    unsigned int i, n;
-    unsigned int c[16];
-    unsigned char *pixels = rawfb->fb.pixels;
-    unsigned int *ptr;
+    if(y < rawfb->scissors.y || y >= rawfb->scissors.h)
+        return;
 
-    pixels += y * rawfb->fb.pitch;
-    ptr = (unsigned int *)pixels + x0;
+    x0 = MAX(rawfb->scissors.x, MIN(rawfb->scissors.w, x0));
+    x1 = MAX(rawfb->scissors.x, MIN(rawfb->scissors.w, x1));
 
-    n = x1 - x0;
-    for (i = 0; i < sizeof(c) / sizeof(c[0]); i++)
-        c[i] = nk_rawfb_color2int(col, rawfb->fb.pl);
-
-    while (n > 16) {
-        memcpy((void *)ptr, c, sizeof(c));
-        n -= 16; ptr += 16;
-    } for (i = 0; i < n; i++)
-        ptr[i] = c[i];
+    unsigned c = nk_rawfb_color2int(col, rawfb->fb.pl);
+    nk_internal_line_horizontal(rawfb, x0, y, x1, c);
 }
 
 static void
@@ -181,12 +344,13 @@ nk_rawfb_img_setpixel(const struct rawfb_image *img,
     if (y0 < img->h && y0 >= 0 && x0 >= 0 && x0 < img->w) {
         ptr = (unsigned char *)img->pixels + (img->pitch * y0);
 	pixel = (unsigned int *)ptr;
-
+#ifndef DISABLE_IMG_SETPIXEL
         if (img->format == NK_FONT_ATLAS_ALPHA8) {
             ptr[x0] = col.a;
         } else {
 	    pixel[x0] = c;
         }
+#endif
     }
 }
 
@@ -245,7 +409,8 @@ nk_rawfb_stroke_line(const struct rawfb_context *rawfb,
     const unsigned int line_thickness, const struct nk_color col)
 {
     short tmp;
-    int dy, dx, stepx, stepy;
+    int dy, dx;
+    unsigned int c = nk_rawfb_color2int(col, rawfb->fb.pl);
 
     NK_UNUSED(line_thickness);
 
@@ -254,7 +419,7 @@ nk_rawfb_stroke_line(const struct rawfb_context *rawfb,
 
     /* fast path */
     if (dy == 0) {
-        if (dx == 0 || y0 >= rawfb->scissors.h || y0 < rawfb->scissors.y)
+        if (dx == 0)
             return;
 
         if (dx < 0) {
@@ -263,49 +428,26 @@ nk_rawfb_stroke_line(const struct rawfb_context *rawfb,
             x1 = x0;
             x0 = tmp;
         }
-        x1 = MIN(rawfb->scissors.w, x1);
-        x0 = MIN(rawfb->scissors.w, x0);
-        x1 = MAX(rawfb->scissors.x, x1);
-        x0 = MAX(rawfb->scissors.x, x0);
         nk_rawfb_line_horizontal(rawfb, x0, y0, x1, col);
         return;
     }
-    if (dy < 0) {
-        dy = -dy;
-        stepy = -1;
-    } else stepy = 1;
-
-    if (dx < 0) {
-        dx = -dx;
-        stepx = -1;
-    } else stepx = 1;
-
-    dy <<= 1;
-    dx <<= 1;
-
-    nk_rawfb_ctx_setpixel(rawfb, x0, y0, col);
-    if (dx > dy) {
-        int fraction = dy - (dx >> 1);
-        while (x0 != x1) {
-            if (fraction >= 0) {
-                y0 += stepy;
-                fraction -= dx;
-            }
-            x0 += stepx;
-            fraction += dy;
-            nk_rawfb_ctx_setpixel(rawfb, x0, y0, col);
+    if(dx == 0)
+    {
+        if (dy < 0) {
+            /* swap x0 and x1 */
+            tmp = y1;
+            y1 = y0;
+            y0 = tmp;
         }
+        nk_rawfb_line_vertical(rawfb, x0, y0, y1, col);
+        return;
+    }
+#define iabs(x) ((x<0)?-(x):(x))    
+    if (iabs(dx) > iabs(dy)) {
+#undef iabs
+        nk_internal_line_slopelow(rawfb, x0, y0, x1, y1, dx, dy, c); //TODO: do clipping
     } else {
-        int fraction = dx - (dy >> 1);
-        while (y0 != y1) {
-            if (fraction >= 0) {
-                x0 += stepx;
-                fraction -= dy;
-            }
-            y0 += stepy;
-            fraction += dx;
-            nk_rawfb_ctx_setpixel(rawfb, x0, y0, col);
-        }
+        nk_internal_line_slopehigh(rawfb, x0, y0, x1, y1, dx, dy, c); //TODO: do clipping
     }
 }
 
@@ -316,7 +458,7 @@ nk_rawfb_fill_polygon(const struct rawfb_context *rawfb,
     int i = 0;
     #define MAX_POINTS 64
     int left = 10000, top = 10000, bottom = 0, right = 0;
-    int nodes, nodeX[MAX_POINTS], pixelX, pixelY, j, swap ;
+    int nodes, nodeX[MAX_POINTS], j, swap;
 
     if (count == 0) return;
     if (count > MAX_POINTS)
@@ -336,7 +478,11 @@ nk_rawfb_fill_polygon(const struct rawfb_context *rawfb,
 
     /* Polygon scanline algorithm released under public-domain by Darel Rex Finley, 2007 */
     /*  Loop through the rows of the image. */
-    for (pixelY = top; pixelY < bottom; pixelY ++) {
+    for (int pixelY = top; pixelY < bottom; pixelY ++) {
+#warning optimize this
+        if(pixelY < rawfb->scissors.y || pixelY >= rawfb->scissors.h)
+          continue; //FIXME: draw only within y range
+
         nodes = 0; /*  Build a list of nodes. */
         j = count - 1;
         for (i = 0; i < count; i++) {
@@ -364,19 +510,21 @@ nk_rawfb_fill_polygon(const struct rawfb_context *rawfb,
             if (nodeX[i+1] > left) {
                 if (nodeX[i+0] < left) nodeX[i+0] = left ;
                 if (nodeX[i+1] > right) nodeX[i+1] = right;
-                for (pixelX = nodeX[i]; pixelX < nodeX[i + 1]; pixelX++)
-                    nk_rawfb_ctx_setpixel(rawfb, pixelX, pixelY, col);
+                nk_rawfb_line_horizontal(rawfb, nodeX[i], pixelY, nodeX[i + 1], col);
             }
         }
     }
     #undef MAX_POINTS
 }
 
+
 static void
 nk_rawfb_stroke_arc(const struct rawfb_context *rawfb,
     short x0, short y0, short w, short h, const short s,
     const short line_thickness, const struct nk_color col)
 {
+    unsigned int c = nk_rawfb_color2int(col, rawfb->fb.pl);
+    
     /* Bresenham's ellipses - modified to draw one quarter */
     const int a2 = (w * w) / 4;
     const int b2 = (h * h) / 4;
@@ -393,16 +541,17 @@ nk_rawfb_stroke_arc(const struct rawfb_context *rawfb,
     w = (w + 1) / 2;
     x0 += w; y0 += h;
 
+#ifndef DISABLE_ARC
     /* First half */
     for (x = 0, y = h, sigma = 2*b2+a2*(1-2*h); b2*x <= a2*y; x++) {
         if (s == 180)
-            nk_rawfb_ctx_setpixel(rawfb, x0 + x, y0 + y, col);
+            nk_internal_setpixel(rawfb, x0 + x, y0 + y, c);
         else if (s == 270)
-            nk_rawfb_ctx_setpixel(rawfb, x0 - x, y0 + y, col);
+            nk_internal_setpixel(rawfb, x0 - x, y0 + y, c);
         else if (s == 0)
-            nk_rawfb_ctx_setpixel(rawfb, x0 + x, y0 - y, col);
+            nk_internal_setpixel(rawfb, x0 + x, y0 - y, c);
         else if (s == 90)
-            nk_rawfb_ctx_setpixel(rawfb, x0 - x, y0 - y, col);
+            nk_internal_setpixel(rawfb, x0 - x, y0 - y, c);
         if (sigma >= 0) {
             sigma += fa2 * (1 - y);
             y--;
@@ -412,18 +561,19 @@ nk_rawfb_stroke_arc(const struct rawfb_context *rawfb,
     /* Second half */
     for (x = w, y = 0, sigma = 2*a2+b2*(1-2*w); a2*y <= b2*x; y++) {
         if (s == 180)
-            nk_rawfb_ctx_setpixel(rawfb, x0 + x, y0 + y, col);
+            nk_internal_setpixel(rawfb, x0 + x, y0 + y, c);
         else if (s == 270)
-            nk_rawfb_ctx_setpixel(rawfb, x0 - x, y0 + y, col);
+            nk_internal_setpixel(rawfb, x0 - x, y0 + y, c);
         else if (s == 0)
-            nk_rawfb_ctx_setpixel(rawfb, x0 + x, y0 - y, col);
+            nk_internal_setpixel(rawfb, x0 + x, y0 - y, c);
         else if (s == 90)
-            nk_rawfb_ctx_setpixel(rawfb, x0 - x, y0 - y, col);
+            nk_internal_setpixel(rawfb, x0 - x, y0 - y, c);
         if (sigma >= 0) {
             sigma += fb2 * (1 - x);
             x--;
         } sigma += a2 * ((4 * y) + 6);
     }
+#endif
 }
 
 static void
@@ -495,21 +645,22 @@ nk_rawfb_stroke_rect(const struct rawfb_context *rawfb,
     const short x, const short y, const short w, const short h,
     const short r, const short line_thickness, const struct nk_color col)
 {
+#warning reenable thickness
     if (r == 0) {
-        nk_rawfb_stroke_line(rawfb, x, y, x + w, y, line_thickness, col);
-        nk_rawfb_stroke_line(rawfb, x, y + h, x + w, y + h, line_thickness, col);
-        nk_rawfb_stroke_line(rawfb, x, y, x, y + h, line_thickness, col);
-        nk_rawfb_stroke_line(rawfb, x + w, y, x + w, y + h, line_thickness, col);
+        nk_rawfb_line_horizontal(rawfb, x, y, x + w, /*line_thickness,*/ col);
+        nk_rawfb_line_vertical(rawfb, x, y + h, y + h/*, line_thickness*/, col);
+        nk_rawfb_line_horizontal(rawfb, x, y, x + w, /*line_thickness,*/ col);
+        nk_rawfb_line_vertical(rawfb, x + w, y, y + h/*, line_thickness*/, col);
     } else {
         const short xc = x + r;
         const short yc = y + r;
         const short wc = (short)(w - 2 * r);
         const short hc = (short)(h - 2 * r);
 
-        nk_rawfb_stroke_line(rawfb, xc, y, xc + wc, y, line_thickness, col);
-        nk_rawfb_stroke_line(rawfb, x + w, yc, x + w, yc + hc, line_thickness, col);
-        nk_rawfb_stroke_line(rawfb, xc, y + h, xc + wc, y + h, line_thickness, col);
-        nk_rawfb_stroke_line(rawfb, x, yc, x, yc + hc, line_thickness, col);
+        nk_rawfb_line_horizontal(rawfb, xc, y, xc + wc/*, line_thickness*/, col);
+        nk_rawfb_line_vertical(rawfb, x + w, yc, yc + hc/*, line_thickness*/, col);
+        nk_rawfb_line_horizontal(rawfb, xc, y + h, xc + wc/*, line_thickness*/, col);
+        nk_rawfb_line_vertical(rawfb, x, yc, yc + hc/*, line_thickness*/, col);
 
         nk_rawfb_stroke_arc(rawfb, xc + wc - r, y,
                 (unsigned)r*2, (unsigned)r*2, 0 , line_thickness, col);
@@ -524,13 +675,16 @@ nk_rawfb_stroke_rect(const struct rawfb_context *rawfb,
 
 static void
 nk_rawfb_fill_rect(const struct rawfb_context *rawfb,
-    const short x, const short y, const short w, const short h,
+    const short x, const short y, short w, short h,
     const short r, const struct nk_color col)
 {
-    int i;
     if (r == 0) {
-        for (i = 0; i < h; i++)
-            nk_rawfb_stroke_line(rawfb, x, y + i, x + w, y + i, 1, col);
+        //clip
+        int x0 = MAX(rawfb->scissors.x, MIN(rawfb->scissors.w, x));
+        int y0 = MAX(rawfb->scissors.y, MIN(rawfb->scissors.h, y));
+        int x1 = MAX(rawfb->scissors.x, MIN(rawfb->scissors.w, x+w));
+        int y1 = MAX(rawfb->scissors.y, MIN(rawfb->scissors.h, y+h));
+        nk_rawfb_internal_fill_rect(rawfb, x0, y0, x1, y1, nk_rawfb_color2int(col, rawfb->fb.pl));
     } else {
         const short xc = x + r;
         const short yc = y + r;
@@ -566,7 +720,7 @@ nk_rawfb_fill_rect(const struct rawfb_context *rawfb,
         pnts[11].x = x;
         pnts[11].y = yc + hc;
 
-        nk_rawfb_fill_polygon(rawfb, pnts, 12, col);
+        nk_rawfb_fill_polygon(rawfb, pnts, 12, col); //TODO: use just rects
 
         nk_rawfb_fill_arc(rawfb, xc + wc - r, y,
                 (unsigned)r*2, (unsigned)r*2, 0 , col);
@@ -628,7 +782,7 @@ nk_rawfb_draw_rect_multi_color(const struct rawfb_context *rawfb,
 	edge_r[i].b = (((((float)br.b - tr.b)/(h-1))*i) + 0.5) + tr.b;
 	edge_r[i].a = (((((float)br.a - tr.a)/(h-1))*i) + 0.5) + tr.a;
     }
-
+#ifndef DISABLE_RECT_MULTICOLOR
     for (i=0; i<h; i++) {
 	for (j=0; j<w; j++) {
 	    if (i==0) {
@@ -650,7 +804,7 @@ nk_rawfb_draw_rect_multi_color(const struct rawfb_context *rawfb,
 	    }
 	}
     }
-
+#endif
     free(edge_buf);
 }
 
@@ -745,6 +899,7 @@ nk_rawfb_stroke_circle(const struct rawfb_context *rawfb,
     short x0, short y0, short w, short h, const short line_thickness,
     const struct nk_color col)
 {
+#if 0
     /* Bresenham's ellipses */
     const int a2 = (w * w) / 4;
     const int b2 = (h * h) / 4;
@@ -761,10 +916,10 @@ nk_rawfb_stroke_circle(const struct rawfb_context *rawfb,
 
     /* First half */
     for (x = 0, y = h, sigma = 2*b2+a2*(1-2*h); b2*x <= a2*y; x++) {
-        nk_rawfb_ctx_setpixel(rawfb, x0 + x, y0 + y, col);
-        nk_rawfb_ctx_setpixel(rawfb, x0 - x, y0 + y, col);
-        nk_rawfb_ctx_setpixel(rawfb, x0 + x, y0 - y, col);
-        nk_rawfb_ctx_setpixel(rawfb, x0 - x, y0 - y, col);
+        nk_internal_ctx_setpixel(rawfb, x0 + x, y0 + y, col);
+        nk_internal_ctx_setpixel(rawfb, x0 - x, y0 + y, col);
+        nk_internal_ctx_setpixel(rawfb, x0 + x, y0 - y, col);
+        nk_internal_ctx_setpixel(rawfb, x0 - x, y0 - y, col);
         if (sigma >= 0) {
             sigma += fa2 * (1 - y);
             y--;
@@ -772,15 +927,21 @@ nk_rawfb_stroke_circle(const struct rawfb_context *rawfb,
     }
     /* Second half */
     for (x = w, y = 0, sigma = 2*a2+b2*(1-2*w); a2*y <= b2*x; y++) {
-        nk_rawfb_ctx_setpixel(rawfb, x0 + x, y0 + y, col);
-        nk_rawfb_ctx_setpixel(rawfb, x0 - x, y0 + y, col);
-        nk_rawfb_ctx_setpixel(rawfb, x0 + x, y0 - y, col);
-        nk_rawfb_ctx_setpixel(rawfb, x0 - x, y0 - y, col);
+        nk_internal_ctx_setpixel(rawfb, x0 + x, y0 + y, col);
+        nk_internal_ctx_setpixel(rawfb, x0 - x, y0 + y, col);
+        nk_internal_ctx_setpixel(rawfb, x0 + x, y0 - y, col);
+        nk_internal_ctx_setpixel(rawfb, x0 - x, y0 - y, col);
         if (sigma >= 0) {
             sigma += fb2 * (1 - x);
             x--;
         } sigma += a2 * ((4 * y) + 6);
     }
+#else
+    nk_rawfb_stroke_arc(rawfb, x0, y0, w, h,   0, line_thickness, col);
+    nk_rawfb_stroke_arc(rawfb, x0, y0, w, h,  90, line_thickness, col);
+    nk_rawfb_stroke_arc(rawfb, x0, y0, w, h, 180, line_thickness, col);
+    nk_rawfb_stroke_arc(rawfb, x0, y0, w, h, 270, line_thickness, col);
+#endif
 }
 
 static void
@@ -900,14 +1061,16 @@ nk_rawfb_stretch_image(const struct rawfb_image *dst,
                 if (j + (int)(dst_rect->y + 0.5f) < dst_scissors->y || j + (int)(dst_rect->y + 0.5f) >= dst_scissors->h)
                     continue;
             }
+#ifndef DISABLE_STRETCH_IMAGE
             col = nk_rawfb_img_getpixel(src, (int)xoff, (int) yoff);
-	    if (col.r || col.g || col.b)
-	    {
-		col.r = fg->r;
-		col.g = fg->g;
-		col.b = fg->b;
-	    }
+            if (col.r || col.g || col.b)
+            {
+                col.r = fg->r;
+                col.g = fg->g;
+                col.b = fg->b;
+            }
             nk_rawfb_img_blendpixel(dst, i + (int)(dst_rect->x + 0.5f), j + (int)(dst_rect->y + 0.5f), col);
+#endif
             xoff += xinc;
         }
         xoff = src_rect->x;
@@ -1121,10 +1284,8 @@ nk_rawfb_render(const struct rawfb_context *rawfb,
             nk_rawfb_drawimage(rawfb, q->x, q->y, q->w, q->h, &q->img, &q->col);
         } break;
         case NK_COMMAND_ARC: {
-            assert(0 && "NK_COMMAND_ARC not implemented\n");
         } break;
         case NK_COMMAND_ARC_FILLED: {
-            assert(0 && "NK_COMMAND_ARC_FILLED not implemented\n");
         } break;
         default: break;
         }
