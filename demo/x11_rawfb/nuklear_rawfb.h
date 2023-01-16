@@ -259,7 +259,7 @@ nk_internal_clear(const struct rawfb_context *rawfb, unsigned int col)
 
 static void
 nk_internal_blit_alpha_mask(const uint8_t *dst, size_t dst_pitch, const uint8_t *src_alpha,
-    short x0, short y0, short x1, short y1, size_t src_pitch, struct nk_color fg)
+    short x0, short y0, short x1, short y1, size_t src_pitch, struct nk_color fg, struct nk_color bg)
 {
     /* This function does not check for scissors or image borders.
      * The caller has to make sure it does no exceed bounds. */
@@ -271,9 +271,11 @@ nk_internal_blit_alpha_mask(const uint8_t *dst, size_t dst_pitch, const uint8_t 
         {
             struct nk_color col;
             uint8_t a = *src_alpha++;
-            col.r = fg.r*a>>8;
-            col.g = fg.g*a>>8;
-            col.b = fg.b*a>>8;
+            uint8_t inv_a = a^255;
+            
+            col.r = (fg.r*a + bg.r*inv_a)>>8;
+            col.g = (fg.g*a + bg.g*inv_a)>>8;
+            col.b = (fg.b*a + bg.b*inv_a)>>8;
             col.a = 0xFF;
 
             unsigned int c = 0;
@@ -1096,8 +1098,15 @@ nk_rawfb_stretch_image(const struct rawfb_image *dst,
     float xinc = src_rect->w / dst_rect->w;
     float yinc = src_rect->h / dst_rect->h;
     float xoff = src_rect->x, yoff = src_rect->y;
+
+    static struct nk_color background = { 0x28, 0x28, 0x28, 0xFF}; //FIXME:match background
+    struct nk_color *bg = &background;
     
-    if(src_rect->w == dst_rect->w && src_rect->h == dst_rect->h && src->format == NK_FONT_ATLAS_ALPHA8)
+    if(src_rect->w == dst_rect->w && src_rect->h == dst_rect->h
+      && src->format == NK_FONT_ATLAS_ALPHA8
+      && bg != NULL
+      && dst->pl == PIXEL_LAYOUT_XRGB_8888
+      )
     {
 #ifndef DISABLE_BLIT_ALPHA
         int x0 = (short)dst_rect->x;
@@ -1112,8 +1121,8 @@ nk_rawfb_stretch_image(const struct rawfb_image *dst,
         x1 = MAX(0, MIN(dst->w, x1));
         y0 = MAX(0, MIN(dst->h, y0));
         y1 = MAX(0, MIN(dst->h, y1));
-        assert(dst->pl == PIXEL_LAYOUT_XRGB_8888);
-        nk_internal_blit_alpha_mask(dst->pixels, dst->pitch, src_alpha, x0, y0, x1, y1, src->pitch, *fg);
+        nk_internal_blit_alpha_mask(dst->pixels, dst->pitch, src_alpha,
+            x0, y0, x1, y1, src->pitch, *fg, background);
 #endif
         return;
     }
