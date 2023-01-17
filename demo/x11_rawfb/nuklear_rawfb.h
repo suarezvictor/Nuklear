@@ -59,17 +59,13 @@ NK_API void                  nk_rawfb_resize_fb(struct rawfb_context *rawfb, voi
 /*
 //RAW API
 nk_internal_clear(rawfb, col)
-
-//expects coords already clipped
 nk_internal_fill_rect(rawfb, x0, y0, x1, y1, col); 
 nk_internal_line_horizontal(rawfb, x0, y, x1, col);
 nk_internal_line_vertical(rawfb, x, y0, y1, col); 
+nk_internal_line(rawfb, x0, y0, x1, y1, col);
 nk_internal_img_setpixel()
 nk_internal_blit_alpha_mask(ptr, pitch, src_alpha, x0, y0, x1, y1, src_pitch, col)
-
-//clips internally
-nk_internal_line(rawfb, x0, y0, x1, y1, col);
-nk_internal_setpixel(ptr, pitch, x, y, col);
+nk_internal_setpixel(ptr, pitch, x, y, col); //clips internally, only used in ARC
 */
 
 
@@ -97,13 +93,14 @@ struct rawfb_context {
 #if 0
 #define DISABLE_CLEAR
 #define DISABLE_RECT
-#define DISABLE_RECT_MULTICOLOR //not tested
-#define DISABLE_LINE_HORIZONTAL //not based on setpixel
-#define DISABLE_LINE_VERTICAL //not based on setpixel
+#define DISABLE_RECT_MULTICOLOR
+#define DISABLE_LINE_HORIZONTAL
+#define DISABLE_LINE_VERTICAL
 #define DISABLE_BLIT_ALPHA
-#endif
-#define DISABLE_LINE //calls setpixel
+#define DISABLE_LINE
+#define DISABLE_SETPIXEL
 #define DISABLE_ARC //calls setpixel
+#endif
 
 
 static void
@@ -125,7 +122,6 @@ nk_internal_setpixel(const struct rawfb_context *rawfb,
         return;
     if(y < rawfb->scissors.y || y >= rawfb->scissors.h)
         return;
-
 #ifndef DISABLE_SETPIXEL
     nk_internal_img_setpixel(rawfb->fb.pixels, rawfb->fb.pitch, x, y, c);
 #endif
@@ -135,6 +131,12 @@ static void
 nk_internal_line(const struct rawfb_context *rawfb,
     short x0, short y0, short x1, short y1, const unsigned int col)
 {
+    /* This function does not check for scissors or image borders.
+     * The caller has to make sure it does no exceed bounds. */
+
+	uint8_t *pixels = rawfb->fb.pixels;
+	size_t pitch = rawfb->fb.pitch;
+
     int dx = x1 - x0;
     int dy = y1 - y0;
     int stepx, stepy, fraction;
@@ -152,8 +154,7 @@ nk_internal_line(const struct rawfb_context *rawfb,
     dy <<= 1;
 
 #ifndef DISABLE_LINE
-    //TODO: consider clipping
-    nk_internal_setpixel(rawfb, x0, y0, col);
+    nk_internal_img_setpixel(pixels, pitch, x0, y0, col);
     
     if (dx > dy)
     {
@@ -165,7 +166,7 @@ nk_internal_line(const struct rawfb_context *rawfb,
             }
             x0 += stepx;
             fraction += dy;
-            nk_internal_setpixel(rawfb, x0, y0, col);
+            nk_internal_img_setpixel(pixels, pitch, x0, y0, col);
         }
     }
     else
@@ -178,7 +179,7 @@ nk_internal_line(const struct rawfb_context *rawfb,
             }
             y0 += stepy;
             fraction += dx;
-            nk_internal_setpixel(rawfb, x0, y0, col);
+            nk_internal_img_setpixel(pixels, pitch, x0, y0, col);
         }
     }
 #endif
@@ -258,19 +259,23 @@ nk_internal_clear(const struct rawfb_context *rawfb, unsigned int col)
 }
 
 static void
-nk_internal_blit_alpha_mask(const uint8_t *dst, size_t dst_pitch, const uint8_t *src_alpha,
-    short x0, short y0, short x1, short y1, size_t src_pitch, struct nk_color fg, struct nk_color bg)
+nk_internal_blit_alpha_mask(uint8_t *dst, size_t dst_pitch, const uint8_t *src_alpha,
+    short x0, short y0, short x1, short y1, size_t src_pitch, uint8_t src_stride, struct nk_color fg, struct nk_color bg)
 {
     /* This function does not check for scissors or image borders.
      * The caller has to make sure it does no exceed bounds. */
-
-    src_pitch -= (x1 - x0); //adjust for the following incrementing
+     
+    //rect is dst
+    dst += y0*dst_pitch;
     for (int y = y0; y < y1; y++)
     {
+        const uint8_t *src = src_alpha;
+        unsigned *dstp = dst;
+        dstp += x0;
         for (int x = x0; x < x1; x++)
         {
             struct nk_color col;
-            uint8_t a = *src_alpha++;
+            uint8_t a = *src;
             uint8_t inv_a = a^255;
             
             col.r = (fg.r*a + bg.r*inv_a)>>8;
@@ -284,9 +289,11 @@ nk_internal_blit_alpha_mask(const uint8_t *dst, size_t dst_pitch, const uint8_t 
 	        c |= col.g << 8;
 	        c |= col.b;
 
-          	nk_internal_img_setpixel(dst, dst_pitch, x, y, c);
+          	*dstp++ = c;
+          	src += src_stride;
         }
         src_alpha += src_pitch;
+        dst += dst_pitch;
     }
 }
 
@@ -390,8 +397,9 @@ nk_rawfb_img_setpixel(const struct rawfb_image *img,
         ptr = (unsigned char *)img->pixels + (img->pitch * y0);
         if (img->format == NK_FONT_ATLAS_ALPHA8) {
             ptr[x0] = col.a;
-        } else {
-	nk_internal_img_setpixel(img->pixels, img->pitch, x0, y0, c);
+        }
+        else {
+			nk_internal_img_setpixel(img->pixels, img->pitch, x0, y0, c); //TODO: needs testing
         }
     }
 }
@@ -445,6 +453,77 @@ nk_rawfb_scissor(struct rawfb_context *rawfb,
     rawfb->scissors.h = MIN(MAX(h + y, 0), rawfb->fb.h);
 }
 
+//written by ChatGPT with prompt "Liang–Barsky in C"
+int liang_barsky(short *x0p, short *y0p, short *x1p, short *y1p,
+                 float xmin, float ymin, float xmax, float ymax)
+{
+    float x0 = *x0p, y0 = *y0p, x1 = *x1p, y1 = *y1p;
+    
+	//chatGPT code BEGIN
+    float t0 = 0.0;
+    float t1 = 1.0;
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float p, q, r;
+
+    for (int edge = 0; edge < 4; edge++)
+    {
+        if (edge == 0) {  // left edge
+            p = -dx;
+            q = x0 - xmin;
+        }
+        else if (edge == 1) {  // right edge
+            p = dx;
+            q = xmax - x0;
+        }
+        else if (edge == 2) {  // bottom edge
+            p = -dy;
+            q = y0 - ymin;
+        }
+        else {  // top edge
+            p = dy;
+            q = ymax - y0;
+        }
+
+
+        if (p == 0)
+        {
+        	if(q < 0)
+				return 0;  // line is parallel to edge and outside
+        }
+        else
+	        r = q / p; //this moved here from chatGPT to avoid division by zero
+
+
+        if (p < 0) {
+            if (r > t1)
+            	return 0;
+            if (r > t0)
+            	t0 = r;
+        }
+        if (p > 0) {
+            if (r < t0)
+            	return 0;
+            if (r < t1)
+            	t1 = r;
+        }
+    }
+
+    // line is partially inside
+    float x1_new = x0 + t0 * dx;
+    float y1_new = y0 + t0 * dy;
+    float x2_new = x0 + t1 * dx;
+    float y2_new = y0 + t1 * dy;
+
+	//chatGPT code END
+
+    *x0p = x1_new;
+    *y0p = y1_new;
+    *x1p = x2_new;
+    *y1p = y2_new;
+    return 1;
+}
+
 static void
 nk_rawfb_stroke_line(const struct rawfb_context *rawfb,
     short x0, short y0, short x1, short y1,
@@ -481,7 +560,10 @@ nk_rawfb_stroke_line(const struct rawfb_context *rawfb,
         return;
     }
 
-    //TODO: do clipping
+	if(!liang_barsky(&x0, &y0, &x1, &y1,
+		rawfb->scissors.x, rawfb->scissors.y, rawfb->scissors.w-1, rawfb->scissors.h-1))
+		return;
+
     nk_internal_line(rawfb, x0, y0, x1, y1, c);
 }
 
@@ -1038,7 +1120,7 @@ nk_rawfb_init(void *fb, void *tex_mem, const unsigned int w, const unsigned int 
 
     memset(rawfb, 0, sizeof(struct rawfb_context));
     rawfb->font_tex.pixels = tex_mem;
-    rawfb->font_tex.format = NK_FONT_ATLAS_ALPHA8;
+    rawfb->font_tex.format = NK_FONT_ATLAS_ALPHA8; //TODO: try NK_FONT_ATLAS_RGBA32
     rawfb->font_tex.w = rawfb->font_tex.h = 0;
 
     rawfb->fb.pixels = fb;
@@ -1102,27 +1184,28 @@ nk_rawfb_stretch_image(const struct rawfb_image *dst,
     static struct nk_color background = { 0x28, 0x28, 0x28, 0xFF}; //FIXME:match background
     struct nk_color *bg = &background;
     
-    if(src_rect->w == dst_rect->w && src_rect->h == dst_rect->h
+    if(src_rect->h == dst_rect->h
       && src->format == NK_FONT_ATLAS_ALPHA8
       && bg != NULL
       && dst->pl == PIXEL_LAYOUT_XRGB_8888
+      && dst_scissors
       )
     {
 #ifndef DISABLE_BLIT_ALPHA
         int x0 = (short)dst_rect->x;
         int y0 = (short)dst_rect->y;
-        int x1 = x0 + (short)dst_rect->w;
-        int y1 = y0 + (short)dst_rect->h;
+        int x1 = (short)(dst_rect->x + dst_rect->w);
+        int y1 = (short)(dst_rect->y + dst_rect->h);
 
-        unsigned char *src_alpha = (unsigned char *)src->pixels + (src->pitch * (int)yoff);
-        src_alpha += (int)xoff;
-        
-        x0 = MAX(0, MIN(dst->w, x0));
-        x1 = MAX(0, MIN(dst->w, x1));
-        y0 = MAX(0, MIN(dst->h, y0));
-        y1 = MAX(0, MIN(dst->h, y1));
+        unsigned char *src_alpha = (unsigned char *)src->pixels + (src->pitch * (int)src_rect->y);
+        int src_stride = xinc;
+        src_alpha += (int)(src_rect->x + src_stride/2.);
+        x0 = MAX(dst_scissors->x, MIN(dst_scissors->w, x0));
+        x1 = MAX(dst_scissors->x, MIN(dst_scissors->w, x1));
+        y0 = MAX(dst_scissors->y, MIN(dst_scissors->h, y0));
+        y1 = MAX(dst_scissors->y, MIN(dst_scissors->h, y1));
         nk_internal_blit_alpha_mask(dst->pixels, dst->pitch, src_alpha,
-            x0, y0, x1, y1, src->pitch, *fg, background);
+            x0, y0, x1, y1, src->pitch, src_stride, *fg, background);
 #endif
         return;
     }
@@ -1222,10 +1305,13 @@ nk_rawfb_draw_text(const struct rawfb_context *rawfb,
 
         dst_rect.x = x + g.offset.x + rect.x;
         dst_rect.y = g.offset.y + rect.y;
-#warning FIX THIS        
-        //dst_rect.w = ceilf(g.width); //makes aspect ratio not 1:1
-        dst_rect.w = char_width  = src_rect.w; //aspect 1:1
+        dst_rect.w = ceilf(g.width);
         dst_rect.h = ceilf(g.height);
+        
+        //corrections
+        float factor = (src_rect.w / dst_rect.w) / (int)(src_rect.w / dst_rect.w);
+        dst_rect.w *= factor;
+        char_width *= factor;
 
         /* Use software rescaling to blit glyph from font_text to framebuffer */
         nk_rawfb_stretch_image(&rawfb->fb, &rawfb->font_tex, &dst_rect, &src_rect, &rawfb->scissors, &fg);
