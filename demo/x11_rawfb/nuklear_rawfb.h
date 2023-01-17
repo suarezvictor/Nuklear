@@ -270,7 +270,7 @@ nk_internal_blit_alpha_mask(uint8_t *dst, size_t dst_pitch, const uint8_t *src_a
     for (int y = y0; y < y1; y++)
     {
         const uint8_t *src = src_alpha;
-        unsigned *dstp = dst;
+        unsigned *dstp = (unsigned *)dst;
         dstp += x0;
         for (int x = x0; x < x1; x++)
         {
@@ -391,7 +391,6 @@ nk_rawfb_img_setpixel(const struct rawfb_image *img,
 {
     unsigned int c = nk_rawfb_color2int(col, img->pl);
     unsigned char *ptr;
-    unsigned int *pixel;
     NK_ASSERT(img);
     if (y0 < img->h && y0 >= 0 && x0 >= 0 && x0 < img->w) {
         ptr = (unsigned char *)img->pixels + (img->pitch * y0);
@@ -491,17 +490,15 @@ int liang_barsky(short *x0p, short *y0p, short *x1p, short *y1p,
         	if(q < 0)
 				return 0;  // line is parallel to edge and outside
         }
-        else
+        else if (p < 0) {
 	        r = q / p; //this moved here from chatGPT to avoid division by zero
-
-
-        if (p < 0) {
             if (r > t1)
             	return 0;
             if (r > t0)
             	t0 = r;
         }
-        if (p > 0) {
+        else if (p > 0) {
+	        r = q / p; //this moved here from chatGPT to avoid division by zero
             if (r < t0)
             	return 0;
             if (r < t1)
@@ -515,7 +512,7 @@ int liang_barsky(short *x0p, short *y0p, short *x1p, short *y1p,
     float x2_new = x0 + t1 * dx;
     float y2_new = y0 + t1 * dy;
 
-	//chatGPT code END
+    //chatGPT code END
 
     *x0p = x1_new;
     *y0p = y1_new;
@@ -792,7 +789,7 @@ nk_rawfb_stroke_rect(const struct rawfb_context *rawfb,
 static void
 nk_rawfb_fill_rect(const struct rawfb_context *rawfb,
     const short x, const short y, short w, short h,
-    const short r, const struct nk_color col)
+    short r, const struct nk_color col)
 {
     if (r == 0) {
         //clip
@@ -809,17 +806,13 @@ nk_rawfb_fill_rect(const struct rawfb_context *rawfb,
         const short hc = (short)(h - 2 * r);
 #if 1
         //recursive calls but with radius 0
-        nk_rawfb_fill_arc(rawfb, xc + wc - r, y,
-                (unsigned)r*2, (unsigned)r*2, 0 , col);
+        nk_rawfb_fill_arc(rawfb, x, y, r*2, r*2, 90 , col); //90 correct
         nk_rawfb_fill_rect(rawfb, xc, y, wc, r, 0, col);
-        nk_rawfb_fill_arc(rawfb, x, y,
-                (unsigned)r*2, (unsigned)r*2, 90 , col);
-        nk_rawfb_fill_rect(rawfb, x, yc, w, hc, 0, col);
-        nk_rawfb_fill_arc(rawfb, x, yc + hc - r,
-                (unsigned)r*2, (unsigned)r*2, 270 , col);
-        nk_rawfb_fill_rect(rawfb, xc, y+h-r, wc, r, 0, col);
-        nk_rawfb_fill_arc(rawfb, xc + wc - r, yc + hc - r,
-                (unsigned)r*2, (unsigned)r*2, 180 , col);
+        nk_rawfb_fill_arc(rawfb, x + wc, y, r*2, r*2, 0 , col); //0 correct
+        nk_rawfb_fill_rect(rawfb, x, yc, w, hc+1, 0, col);
+        nk_rawfb_fill_arc(rawfb, x, y + hc, r*2, r*2, 270, col);
+        nk_rawfb_fill_rect(rawfb, xc, yc + hc, wc, r, 0, col); //270 correct
+        nk_rawfb_fill_arc(rawfb, x + wc, y + hc, r*2, r*2, 180 , col); //180 correct
 #else
         struct nk_vec2i pnts[12];
         pnts[0].x = x;
