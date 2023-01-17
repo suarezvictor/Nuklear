@@ -63,9 +63,9 @@ nk_internal_fill_rect(rawfb, x0, y0, x1, y1, col);
 nk_internal_line_horizontal(rawfb, x0, y, x1, col);
 nk_internal_line_vertical(rawfb, x, y0, y1, col); 
 nk_internal_line(rawfb, x0, y0, x1, y1, col);
-nk_internal_img_setpixel()
+nk_internal_img_setpixel(ptr, pitch, x, y, col)
 nk_internal_blit_alpha_mask(ptr, pitch, src_alpha, x0, y0, x1, y1, src_pitch, col)
-nk_internal_setpixel(ptr, pitch, x, y, col); //clips internally, only used in ARC
+nk_internal_setpixel(rawfb, x, y, col); //clips internally, only used in ARC
 */
 
 
@@ -256,6 +256,57 @@ nk_internal_clear(const struct rawfb_context *rawfb, unsigned int col)
 #ifndef DISABLE_CLEAR
     nk_internal_fill_rect(rawfb, 0, 0, rawfb->fb.w, rawfb->fb.h, col);
 #endif
+}
+
+static void
+nk_internal_blit(uint8_t *dst, size_t dst_pitch, const uint8_t *src_rgba,
+    short x0, short y0, short x1, short y1, size_t src_pitch, uint8_t src_stride, struct nk_color fg, struct nk_color bg)
+{
+    /* This function does not check for scissors or image borders.
+     * The caller has to make sure it does no exceed bounds. */
+     
+    //rect is dst
+    dst += y0*dst_pitch;
+    for (int y = y0; y < y1; y++)
+    {
+        const uint8_t *src = src_rgba;
+        unsigned *dstp = (unsigned *)dst;
+        dstp += x0;
+        for (int x = x0; x < x1; x++)
+        {
+            unsigned src_c = *(unsigned *)src;
+            struct nk_color sc = { src_c>>24, src_c>>16, src_c>>8, src_c};
+            if(sc.g || sc.b || sc.r)
+            {
+            	*dstp++ = -1;
+            }
+            else
+            	*dstp++ = 0;
+         
+/*
+            struct nk_color col;
+            uint8_t a = sc.a;
+            uint8_t inv_a = a^255;
+            col.r = (fg.r*a + sc.r*inv_a)>>8;
+            col.g = (fg.g*a + sc.g*inv_a)>>8;
+            col.b = (fg.b*a + sc.b*inv_a)>>8;
+            col.a = 0xFF;
+            
+            col = sc;
+
+            unsigned int c = 0;
+	        c |= col.a << 24; //assumes XRGB
+	        c |= col.r << 16;
+	        c |= col.g << 8;
+	        c |= col.b;
+
+          	*dstp++ = c;
+          	*/
+          	src += src_stride;
+        }
+        src_rgba += src_pitch;
+        dst += dst_pitch;
+    }
 }
 
 static void
@@ -1113,7 +1164,8 @@ nk_rawfb_init(void *fb, void *tex_mem, const unsigned int w, const unsigned int 
 
     memset(rawfb, 0, sizeof(struct rawfb_context));
     rawfb->font_tex.pixels = tex_mem;
-    rawfb->font_tex.format = NK_FONT_ATLAS_ALPHA8; //TODO: try NK_FONT_ATLAS_RGBA32
+    //rawfb->font_tex.format = NK_FONT_ATLAS_ALPHA8;
+    rawfb->font_tex.format = NK_FONT_ATLAS_RGBA32;
     rawfb->font_tex.w = rawfb->font_tex.h = 0;
 
     rawfb->fb.pixels = fb;
@@ -1169,16 +1221,10 @@ nk_rawfb_stretch_image(const struct rawfb_image *dst,
     const struct nk_color *fg)
 {
     short i, j;
-    struct nk_color col = {0, 0, 0, 0};
-    float xinc = src_rect->w / dst_rect->w;
-    float yinc = src_rect->h / dst_rect->h;
-    float xoff = src_rect->x, yoff = src_rect->y;
-
     static struct nk_color background = { 0x28, 0x28, 0x28, 0xFF}; //FIXME:match background
     struct nk_color *bg = &background;
-    
+
     if(src_rect->h == dst_rect->h
-      && src->format == NK_FONT_ATLAS_ALPHA8
       && bg != NULL
       && dst->pl == PIXEL_LAYOUT_XRGB_8888
       && dst_scissors
@@ -1190,19 +1236,61 @@ nk_rawfb_stretch_image(const struct rawfb_image *dst,
         int x1 = (short)(dst_rect->x + dst_rect->w);
         int y1 = (short)(dst_rect->y + dst_rect->h);
 
-        unsigned char *src_alpha = (unsigned char *)src->pixels + (src->pitch * (int)src_rect->y);
-        int src_stride = xinc;
-        src_alpha += (int)(src_rect->x + src_stride/2.);
+        int src_stride = (int)(src_rect->w / dst_rect->w);
         x0 = MAX(dst_scissors->x, MIN(dst_scissors->w, x0));
         x1 = MAX(dst_scissors->x, MIN(dst_scissors->w, x1));
         y0 = MAX(dst_scissors->y, MIN(dst_scissors->h, y0));
         y1 = MAX(dst_scissors->y, MIN(dst_scissors->h, y1));
-        nk_internal_blit_alpha_mask(dst->pixels, dst->pitch, src_alpha,
-            x0, y0, x1, y1, src->pitch, src_stride, *fg, background);
+
+        if(src->format == NK_FONT_ATLAS_ALPHA8)
+        {
+        	unsigned char *src_alpha = (unsigned char *)src->pixels + (src->pitch * (int)src_rect->y);
+        	src_alpha += (int)(src_rect->x + src_stride/2.);
+        	nk_internal_blit_alpha_mask(dst->pixels, dst->pitch, src_alpha,
+        		x0, y0, x1, y1, src->pitch, src_stride, *fg, background);
+        }
+
+        if(src->format == NK_FONT_ATLAS_RGBA32)
+        {
+#if 1
+			unsigned char *src_rgba = (unsigned char *)src->pixels + (src->pitch * (int) src_rect->y);
+			src_rgba += sizeof(unsigned)*(int)src_rect->x;
+			for (int y = y0; y < y1; y++)
+			{
+				unsigned char *ptr = src_rgba;
+				for (int x = x0; x < x1; x++)
+				{
+					unsigned pixel = ((unsigned int *)ptr)[0];
+					struct nk_color col = nk_rawfb_int2color(pixel, src->pl);
+					if (col.r || col.g || col.b)
+					{
+					    col.r = fg->r;
+					    col.g = fg->g;
+					    col.b = fg->b;
+					}
+					nk_rawfb_img_blendpixel(dst, x, y, col);
+
+					ptr += 4*src_stride;
+				}
+				src_rgba += src->pitch;
+			}
+#else    
+		    unsigned char *src_rgba = (unsigned char *)src->pixels + (src->pitch * (int)src_rect->y);
+		    src_rgba += sizeof(unsigned)*(int)(src_rect->x + src_stride/2.);
+		    nk_internal_blit(dst->pixels, dst->pitch, src_rgba,
+		        x0, y0, x1, y1, src->pitch, src_stride*4, *fg, background);
 #endif
-        return;
+		}
+#endif
+		return;
     }
     
+    printf("Non-optimized stretch blit\n");    
+    struct nk_color col;
+    float xinc = src_rect->w / dst_rect->w;
+    float yinc = src_rect->h / dst_rect->h;
+    float xoff = src_rect->x, yoff = src_rect->y;
+
 
     /* Simple nearest filtering rescaling */
     /* TODO: use bilinear filter */
@@ -1301,7 +1389,7 @@ nk_rawfb_draw_text(const struct rawfb_context *rawfb,
         dst_rect.w = ceilf(g.width);
         dst_rect.h = ceilf(g.height);
         
-        //corrections
+        //corrections for integer ratios of (src/dst) widths
         float factor = (src_rect.w / dst_rect.w) / (int)(src_rect.w / dst_rect.w);
         dst_rect.w *= factor;
         char_width *= factor;
